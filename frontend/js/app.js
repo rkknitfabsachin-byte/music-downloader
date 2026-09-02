@@ -203,7 +203,13 @@ document.addEventListener("DOMContentLoaded", () => {
         body: JSON.stringify({ url: url })
       });
 
-      const data = await response.json();
+      let data;
+      const rawText = await response.text();
+      try {
+        data = JSON.parse(rawText);
+      } catch (_) {
+        throw new Error(response.status === 404 ? "Server API endpoint not found. Please verify backend is running." : (rawText || `Server returned error (${response.status})`));
+      }
 
       if (!response.ok || !data.success) {
         throw new Error(data.detail || data.error || "Failed to analyze link.");

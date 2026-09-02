@@ -26,6 +26,21 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DOWNLOADS_DIR = os.path.join(BASE_DIR, "downloads")
 os.makedirs(DOWNLOADS_DIR, exist_ok=True)
 
+# Datacenter & Bot Bypass Configuration
+DEFAULT_HTTP_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Sec-Fetch-Mode": "navigate",
+}
+
+DEFAULT_EXTRACTOR_ARGS = {
+    "youtube": {
+        "player_client": ["web_creator", "android", "ios", "mweb"],
+        "player_skip": ["configs"],
+    }
+}
+
 
 def detect_platform(url: str) -> Dict[str, str]:
     """Detect platform name and brand styling from URL."""
@@ -98,8 +113,6 @@ class DownloadManager:
         self.metadata_cache: Dict[str, Tuple[float, Dict[str, Any]]] = {}
         self.cache_ttl = 600  # 10 minutes cache TTL
         self.lock = threading.Lock()
-        
-        # Start periodic background cleanup
         self._start_cleanup_worker()
 
     def _start_cleanup_worker(self):
@@ -110,7 +123,6 @@ class DownloadManager:
                 try:
                     now = time.time()
                     with self.lock:
-                        # Clean metadata cache
                         expired_keys = [
                             k for k, (ts, _) in self.metadata_cache.items()
                             if now - ts > self.cache_ttl
@@ -118,7 +130,6 @@ class DownloadManager:
                         for k in expired_keys:
                             del self.metadata_cache[k]
 
-                    # Clean old task folders (> 2 hours old)
                     for folder in os.listdir(DOWNLOADS_DIR):
                         fpath = os.path.join(DOWNLOADS_DIR, folder)
                         if os.path.isdir(fpath):
@@ -144,7 +155,7 @@ class DownloadManager:
             return sorted(completed, key=lambda x: x.get("created_at", 0), reverse=True)
 
     def extract_info(self, url: str) -> Dict[str, Any]:
-        """Extract metadata from media URL with high-speed in-memory caching."""
+        """Extract metadata from media URL with bot-bypass and caching."""
         clean_url = url.strip()
 
         # Check Cache
@@ -160,8 +171,10 @@ class DownloadManager:
             "no_warnings": True,
             "extract_flat": False,
             "skip_download": True,
-            "socket_timeout": 12,
+            "socket_timeout": 15,
             "retries": 3,
+            "http_headers": DEFAULT_HTTP_HEADERS,
+            "extractor_args": DEFAULT_EXTRACTOR_ARGS,
         }
 
         try:
@@ -228,7 +241,7 @@ class DownloadManager:
                     {"id": "mp3-256", "label": "MP3 - 256 kbps (Studio Quality)", "bitrate": "256", "ext": "mp3", "recommended": False},
                     {"id": "mp3-192", "label": "MP3 - 192 kbps (Standard)", "bitrate": "192", "ext": "mp3", "recommended": False},
                     {"id": "mp3-128", "label": "MP3 - 128 kbps (Compact)", "bitrate": "128", "ext": "mp3", "recommended": False},
-                    {"id": "m4a", "label": "M4A / AAC (Lossless Fast Stream)", "bitrate": "best", "ext": "m4a", "recommended": False},
+                    {"id": "m4a", "label": "M4A / AAC (Lossless Stream)", "bitrate": "best", "ext": "m4a", "recommended": False},
                     {"id": "wav", "label": "WAV (Uncompressed Audio)", "bitrate": "best", "ext": "wav", "recommended": False},
                     {"id": "flac", "label": "FLAC (High-Res Lossless)", "bitrate": "best", "ext": "flac", "recommended": False},
                 ]
@@ -368,7 +381,7 @@ class DownloadManager:
 
         outtmpl = os.path.join(task_dir, "%(title).100s [%(id)s].%(ext)s")
 
-        # High-Speed Optimized yt-dlp configuration
+        # High-Speed Optimized & Anti-Bot yt-dlp configuration
         ydl_opts: Dict[str, Any] = {
             "outtmpl": outtmpl,
             "quiet": True,
@@ -377,10 +390,12 @@ class DownloadManager:
             "noplaylist": True,
             "windowsfilenames": True,
             "restrictfilenames": False,
+            "http_headers": DEFAULT_HTTP_HEADERS,
+            "extractor_args": DEFAULT_EXTRACTOR_ARGS,
             # SPEED OPTIMIZATIONS
-            "concurrent_fragment_downloads": 8,   # Download 8 chunks simultaneously (3x - 5x speedup)
-            "buffersize": 1048576,                # 1MB buffer for faster I/O
-            "http_chunk_size": 10485760,          # 10MB HTTP chunk size
+            "concurrent_fragment_downloads": 8,
+            "buffersize": 1048576,
+            "http_chunk_size": 10485760,
             "socket_timeout": 15,
             "retries": 5,
             "fragment_retries": 10,
@@ -421,7 +436,6 @@ class DownloadManager:
                 ydl_opts["writethumbnail"] = True
                 postprocessors.append({"key": "EmbedThumbnail"})
 
-            # Pass multi-threading args to FFmpeg for rapid audio encoding
             ydl_opts["postprocessor_args"] = {
                 "ffmpeg": ["-threads", "0"]
             }
@@ -442,7 +456,6 @@ class DownloadManager:
                 ydl_opts["format"] = "bestvideo+bestaudio/best"
 
             ydl_opts["merge_output_format"] = "mp4"
-            # Stream copy video where possible to eliminate slow re-encoding!
             ydl_opts["postprocessor_args"] = {
                 "ffmpeg": ["-c:v", "copy", "-threads", "0"]
             }
