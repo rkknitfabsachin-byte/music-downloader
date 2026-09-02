@@ -35,6 +35,25 @@ DEFAULT_HTTP_HEADERS = {
 }
 
 
+def get_cookie_file() -> Optional[str]:
+    """Retrieve cookies file path from disk or environment variable."""
+    cookies_file = os.path.join(BASE_DIR, "cookies.txt")
+    
+    # Check if YTDL_COOKIES is provided via environment variable (e.g. Render Dashboard)
+    env_cookies = os.environ.get("YTDL_COOKIES")
+    if env_cookies and not os.path.exists(cookies_file):
+        try:
+            with open(cookies_file, "w", encoding="utf-8") as f:
+                f.write(env_cookies.strip())
+            logger.info("Wrote cookies from YTDL_COOKIES environment variable.")
+        except Exception as e:
+            logger.warning(f"Could not write YTDL_COOKIES: {e}")
+
+    if os.path.exists(cookies_file) and os.path.getsize(cookies_file) > 10:
+        return cookies_file
+    return None
+
+
 def detect_platform(url: str) -> Dict[str, str]:
     """Detect platform name and brand styling from URL."""
     url_lower = url.lower()
@@ -112,7 +131,7 @@ class DownloadManager:
         """Periodically cleans up old files (>2 hours) from downloads directory."""
         def cleanup_loop():
             while True:
-                time.sleep(1800)  # Check every 30 minutes
+                time.sleep(1800)
                 try:
                     now = time.time()
                     with self.lock:
@@ -148,7 +167,7 @@ class DownloadManager:
             return sorted(completed, key=lambda x: x.get("created_at", 0), reverse=True)
 
     def extract_info(self, url: str) -> Dict[str, Any]:
-        """Extract metadata from media URL with JavaScript challenge solver support."""
+        """Extract metadata from media URL with JavaScript challenge solver & cookies support."""
         clean_url = url.strip()
 
         # Check Cache
@@ -169,6 +188,10 @@ class DownloadManager:
             "http_headers": DEFAULT_HTTP_HEADERS,
             "js_runtimes": {"node": {}},
         }
+
+        cookie_path = get_cookie_file()
+        if cookie_path:
+            ydl_opts["cookiefile"] = cookie_path
 
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -393,9 +416,9 @@ class DownloadManager:
             "fragment_retries": 10,
         }
 
-        cookies_file = os.path.join(BASE_DIR, "cookies.txt")
-        if os.path.exists(cookies_file):
-            ydl_opts["cookiefile"] = cookies_file
+        cookie_path = get_cookie_file()
+        if cookie_path:
+            ydl_opts["cookiefile"] = cookie_path
 
         # Format configurations
         if media_type == "audio":
