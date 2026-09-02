@@ -6,7 +6,7 @@ import uuid
 import shutil
 import logging
 import threading
-from typing import Dict, Any, Optional, Tuple
+from typing import Dict, Any, Optional, Tuple, List
 import yt_dlp
 
 # Configure logging
@@ -39,9 +39,8 @@ def get_cookie_file() -> Optional[str]:
     """Retrieve cookies file path from disk or environment variable."""
     cookies_file = os.path.join(BASE_DIR, "cookies.txt")
     
-    # Check if YTDL_COOKIES is provided via environment variable (e.g. Render Dashboard)
     env_cookies = os.environ.get("YTDL_COOKIES")
-    if env_cookies and not os.path.exists(cookies_file):
+    if env_cookies:
         try:
             with open(cookies_file, "w", encoding="utf-8") as f:
                 f.write(env_cookies.strip())
@@ -123,7 +122,7 @@ class DownloadManager:
     def __init__(self):
         self.tasks: Dict[str, Dict[str, Any]] = {}
         self.metadata_cache: Dict[str, Tuple[float, Dict[str, Any]]] = {}
-        self.cache_ttl = 600  # 10 minutes cache TTL
+        self.cache_ttl = 600
         self.lock = threading.Lock()
         self._start_cleanup_worker()
 
@@ -167,7 +166,7 @@ class DownloadManager:
             return sorted(completed, key=lambda x: x.get("created_at", 0), reverse=True)
 
     def extract_info(self, url: str) -> Dict[str, Any]:
-        """Extract metadata from media URL with JavaScript challenge solver & cookies support."""
+        """Extract metadata from media URL with multi-strategy fallback."""
         clean_url = url.strip()
 
         # Check Cache
@@ -178,112 +177,148 @@ class DownloadManager:
                     logger.info(f"Serving metadata from cache for {clean_url}")
                     return cached_data
 
-        ydl_opts = {
-            "quiet": True,
-            "no_warnings": True,
-            "extract_flat": False,
-            "skip_download": True,
-            "socket_timeout": 15,
-            "retries": 3,
-            "http_headers": DEFAULT_HTTP_HEADERS,
-            "js_runtimes": {"node": {}},
-        }
-
         cookie_path = get_cookie_file()
-        if cookie_path:
-            ydl_opts["cookiefile"] = cookie_path
+
+        # Multiple fallback strategies to guarantee extraction on datacenter IPs
+        strategies: List[Dict[str, Any]] = [
+            # Strategy 1: Standard with Node.js and cookies if available
+            {
+                "js_runtimes": {"node": {}},
+                **({"cookiefile": cookie_path} if cookie_path else {})
+            },
+            # Strategy 2: Mobile client emulation (Android & iOS)
+            {
+                "js_runtimes": {"node": {}},
+                "extractor_args": {"youtube": {"player_client": ["android", "ios"]}},
+            },
+            # Strategy 3: Web creator / mweb fallback
+            {
+                "js_runtimes": {"node": {}},
+                "extractor_args": {"youtube": {"player_client": ["web_creator", "mweb"]}},
+            },
+            # Strategy 4: TV client fallback
+            {
+                "js_runtimes": {"node": {}},
+                "extractor_args": {"youtube": {"player_client": ["tvhtml5", "tv"]}},
+            }
+        ]
+
+        last_error = None
+        info = None
+
+        for strategy in strategies:
+            ydl_opts = {
+                "quiet": True,
+                "no_warnings": True,
+                "extract_flat": False,
+                "skip_download": True,
+                "socket_timeout": 15,
+                "retries": 3,
+                "http_headers": DEFAULT_HTTP_HEADERS,
+                **strategy
+            }
+
+            try:
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    info = ydl.extract_info(clean_url, download=False)
+                    if info:
+                        break
+            except Exception as e:
+                last_error = e
+                logger.warning(f"Extraction strategy failed ({strategy}): {e}. Retrying with next fallback...")
+
+        if not info:
+            logger.error(f"All extraction strategies failed for {clean_url}: {last_error}")
+            return {
+                "success": False,
+                "error": str(last_error),
+                "url": clean_url,
+                "platform": detect_platform(clean_url)
+            }
 
         try:
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(clean_url, download=False)
-                
-                # If playlist or multi-entry, pick the first or main entry
-                if "entries" in info and info["entries"]:
-                    entries = list(info["entries"])
-                    if entries and entries[0]:
-                        entry_info = entries[0]
-                        entry_info["playlist_count"] = len(entries)
-                        info = entry_info
+            if "entries" in info and info["entries"]:
+                entries = list(info["entries"])
+                if entries and entries[0]:
+                    entry_info = entries[0]
+                    entry_info["playlist_count"] = len(entries)
+                    info = entry_info
 
-                title = info.get("title", "Untitled Media")
-                duration = info.get("duration", 0)
-                thumbnail = info.get("thumbnail")
-                uploader = info.get("uploader") or info.get("channel") or info.get("creator") or "Unknown Creator"
-                view_count = info.get("view_count")
-                platform_meta = detect_platform(clean_url)
+            title = info.get("title", "Untitled Media")
+            duration = info.get("duration", 0)
+            thumbnail = info.get("thumbnail")
+            uploader = info.get("uploader") or info.get("channel") or info.get("creator") or "Unknown Creator"
+            view_count = info.get("view_count")
+            platform_meta = detect_platform(clean_url)
 
-                # Collect available video resolutions
-                formats = info.get("formats", [])
-                resolutions_found = set()
-                video_options = []
+            formats = info.get("formats", [])
+            resolutions_found = set()
+            video_options = []
 
-                standard_resolutions = [
-                    ("4K (2160p)", 2160),
-                    ("1440p (2K)", 1440),
-                    ("1080p (Full HD)", 1080),
-                    ("720p (HD)", 720),
-                    ("480p (SD)", 480),
-                    ("360p", 360),
-                ]
+            standard_resolutions = [
+                ("4K (2160p)", 2160),
+                ("1440p (2K)", 1440),
+                ("1080p (Full HD)", 1080),
+                ("720p (HD)", 720),
+                ("480p (SD)", 480),
+                ("360p", 360),
+            ]
 
-                for f in formats:
-                    height = f.get("height")
-                    if height:
-                        resolutions_found.add(height)
+            for f in formats:
+                height = f.get("height")
+                if height:
+                    resolutions_found.add(height)
 
-                # Always offer Best Quality
-                video_options.append({
-                    "id": "best",
-                    "label": "Best Available Quality (Max)",
-                    "resolution": "Best",
-                    "ext": "mp4",
-                    "recommended": True
-                })
+            video_options.append({
+                "id": "best",
+                "label": "Best Available Quality (Max)",
+                "resolution": "Best",
+                "ext": "mp4",
+                "recommended": True
+            })
 
-                for label, res in standard_resolutions:
-                    if any(h >= res for h in resolutions_found) or not resolutions_found:
-                        video_options.append({
-                            "id": f"res_{res}",
-                            "label": label,
-                            "resolution": f"{res}p",
-                            "ext": "mp4",
-                            "height": res,
-                            "recommended": res == 1080
-                        })
+            for label, res in standard_resolutions:
+                if any(h >= res for h in resolutions_found) or not resolutions_found:
+                    video_options.append({
+                        "id": f"res_{res}",
+                        "label": label,
+                        "resolution": f"{res}p",
+                        "ext": "mp4",
+                        "height": res,
+                        "recommended": res == 1080
+                    })
 
-                # Audio format options
-                audio_options = [
-                    {"id": "mp3-320", "label": "MP3 - 320 kbps (High Fidelity)", "bitrate": "320", "ext": "mp3", "recommended": True},
-                    {"id": "mp3-256", "label": "MP3 - 256 kbps (Studio Quality)", "bitrate": "256", "ext": "mp3", "recommended": False},
-                    {"id": "mp3-192", "label": "MP3 - 192 kbps (Standard)", "bitrate": "192", "ext": "mp3", "recommended": False},
-                    {"id": "mp3-128", "label": "MP3 - 128 kbps (Compact)", "bitrate": "128", "ext": "mp3", "recommended": False},
-                    {"id": "m4a", "label": "M4A / AAC (Lossless Stream)", "bitrate": "best", "ext": "m4a", "recommended": False},
-                    {"id": "wav", "label": "WAV (Uncompressed Audio)", "bitrate": "best", "ext": "wav", "recommended": False},
-                    {"id": "flac", "label": "FLAC (High-Res Lossless)", "bitrate": "best", "ext": "flac", "recommended": False},
-                ]
+            audio_options = [
+                {"id": "mp3-320", "label": "MP3 - 320 kbps (High Fidelity)", "bitrate": "320", "ext": "mp3", "recommended": True},
+                {"id": "mp3-256", "label": "MP3 - 256 kbps (Studio Quality)", "bitrate": "256", "ext": "mp3", "recommended": False},
+                {"id": "mp3-192", "label": "MP3 - 192 kbps (Standard)", "bitrate": "192", "ext": "mp3", "recommended": False},
+                {"id": "mp3-128", "label": "MP3 - 128 kbps (Compact)", "bitrate": "128", "ext": "mp3", "recommended": False},
+                {"id": "m4a", "label": "M4A / AAC (Lossless Stream)", "bitrate": "best", "ext": "m4a", "recommended": False},
+                {"id": "wav", "label": "WAV (Uncompressed Audio)", "bitrate": "best", "ext": "wav", "recommended": False},
+                {"id": "flac", "label": "FLAC (High-Res Lossless)", "bitrate": "best", "ext": "flac", "recommended": False},
+            ]
 
-                result = {
-                    "success": True,
-                    "url": clean_url,
-                    "title": title,
-                    "uploader": uploader,
-                    "duration": duration,
-                    "duration_formatted": format_duration(duration),
-                    "thumbnail": thumbnail,
-                    "view_count": f"{view_count:,}" if view_count else None,
-                    "platform": platform_meta,
-                    "video_options": video_options,
-                    "audio_options": audio_options,
-                }
+            result = {
+                "success": True,
+                "url": clean_url,
+                "title": title,
+                "uploader": uploader,
+                "duration": duration,
+                "duration_formatted": format_duration(duration),
+                "thumbnail": thumbnail,
+                "view_count": f"{view_count:,}" if view_count else None,
+                "platform": platform_meta,
+                "video_options": video_options,
+                "audio_options": audio_options,
+            }
 
-                # Save into cache
-                with self.lock:
-                    self.metadata_cache[clean_url] = (time.time(), result)
+            with self.lock:
+                self.metadata_cache[clean_url] = (time.time(), result)
 
-                return result
+            return result
 
         except Exception as e:
-            logger.error(f"Error extracting info for {clean_url}: {e}")
+            logger.error(f"Formatting error for {clean_url}: {e}")
             return {
                 "success": False,
                 "error": str(e),
@@ -397,30 +432,13 @@ class DownloadManager:
 
         outtmpl = os.path.join(task_dir, "%(title).100s [%(id)s].%(ext)s")
 
-        ydl_opts: Dict[str, Any] = {
-            "outtmpl": outtmpl,
-            "quiet": True,
-            "no_warnings": True,
-            "progress_hooks": [lambda d: self._progress_hook(task_id, d)],
-            "noplaylist": True,
-            "windowsfilenames": True,
-            "restrictfilenames": False,
-            "http_headers": DEFAULT_HTTP_HEADERS,
-            "js_runtimes": {"node": {}},
-            # SPEED OPTIMIZATIONS
-            "concurrent_fragment_downloads": 8,
-            "buffersize": 1048576,
-            "http_chunk_size": 10485760,
-            "socket_timeout": 15,
-            "retries": 5,
-            "fragment_retries": 10,
-        }
-
         cookie_path = get_cookie_file()
-        if cookie_path:
-            ydl_opts["cookiefile"] = cookie_path
 
-        # Format configurations
+        # Build format and postprocessor configs
+        postprocessors = []
+        format_spec = "bestaudio/best"
+        postprocessor_args = {"ffmpeg": ["-threads", "0"]}
+
         if media_type == "audio":
             audio_codec = format_ext.lower()
             if audio_codec not in ["mp3", "m4a", "wav", "flac"]:
@@ -430,8 +448,7 @@ class DownloadManager:
             if quality.startswith("mp3-"):
                 bitrate = quality.split("-")[1]
 
-            ydl_opts["format"] = "bestaudio/best"
-            
+            format_spec = "bestaudio/best"
             postprocessors = [
                 {
                     "key": "FFmpegExtractAudio",
@@ -446,16 +463,9 @@ class DownloadManager:
             ]
 
             if audio_codec in ["mp3", "m4a"]:
-                ydl_opts["writethumbnail"] = True
                 postprocessors.append({"key": "EmbedThumbnail"})
 
-            ydl_opts["postprocessor_args"] = {
-                "ffmpeg": ["-threads", "0"]
-            }
-            ydl_opts["postprocessors"] = postprocessors
-
         else:
-            # Video mode
             height_limit = None
             if quality.startswith("res_"):
                 try:
@@ -464,30 +474,76 @@ class DownloadManager:
                     pass
 
             if height_limit:
-                ydl_opts["format"] = f"bestvideo[height<={height_limit}]+bestaudio/best[height<={height_limit}]/best"
+                format_spec = f"bestvideo[height<={height_limit}]+bestaudio/best[height<={height_limit}]/best"
             else:
-                ydl_opts["format"] = "bestvideo+bestaudio/best"
+                format_spec = "bestvideo+bestaudio/best"
 
-            ydl_opts["merge_output_format"] = "mp4"
-            ydl_opts["postprocessor_args"] = {
-                "ffmpeg": ["-c:v", "copy", "-threads", "0"]
-            }
-            ydl_opts["postprocessors"] = [
+            postprocessor_args = {"ffmpeg": ["-c:v", "copy", "-threads", "0"]}
+            postprocessors = [
                 {
                     "key": "FFmpegMetadata",
                     "add_metadata": True,
                 }
             ]
 
-        try:
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(url, download=True)
-                
-                if "entries" in info and info["entries"]:
-                    info = info["entries"][0]
+        # Download strategies
+        strategies = [
+            {"js_runtimes": {"node": {}}, **({"cookiefile": cookie_path} if cookie_path else {})},
+            {"js_runtimes": {"node": {}}, "extractor_args": {"youtube": {"player_client": ["android", "ios"]}}},
+            {"js_runtimes": {"node": {}}, "extractor_args": {"youtube": {"player_client": ["web_creator", "mweb"]}}},
+        ]
 
-                real_title = info.get("title") or initial_title or "media"
-                thumbnail = info.get("thumbnail")
+        last_error = None
+        info = None
+
+        for strategy in strategies:
+            ydl_opts: Dict[str, Any] = {
+                "outtmpl": outtmpl,
+                "quiet": True,
+                "no_warnings": True,
+                "progress_hooks": [lambda d: self._progress_hook(task_id, d)],
+                "noplaylist": True,
+                "windowsfilenames": True,
+                "restrictfilenames": False,
+                "http_headers": DEFAULT_HTTP_HEADERS,
+                "format": format_spec,
+                "writethumbnail": media_type == "audio" and format_ext in ["mp3", "m4a"],
+                "merge_output_format": "mp4" if media_type == "video" else None,
+                "postprocessors": postprocessors,
+                "postprocessor_args": postprocessor_args,
+                "concurrent_fragment_downloads": 8,
+                "buffersize": 1048576,
+                "http_chunk_size": 10485760,
+                "socket_timeout": 15,
+                "retries": 5,
+                "fragment_retries": 10,
+                **strategy
+            }
+
+            try:
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    info = ydl.extract_info(url, download=True)
+                    if info:
+                        break
+            except Exception as e:
+                last_error = e
+                logger.warning(f"Download strategy failed ({strategy}): {e}")
+
+        if not info:
+            with self.lock:
+                task = self.tasks[task_id]
+                task["status"] = "error"
+                task["error"] = str(last_error)
+                task["speed"] = "Failed"
+                task["eta"] = "--"
+            return
+
+        try:
+            if "entries" in info and info["entries"]:
+                info = info["entries"][0]
+
+            real_title = info.get("title") or initial_title or "media"
+            thumbnail = info.get("thumbnail")
 
             downloaded_files = [
                 os.path.join(task_dir, f)
@@ -523,7 +579,7 @@ class DownloadManager:
                 logger.info(f"Task {task_id} completed: {file_name} ({task['file_size_str']})")
 
         except Exception as e:
-            logger.error(f"Download failed for task {task_id}: {e}", exc_info=True)
+            logger.error(f"Finalization failed for task {task_id}: {e}", exc_info=True)
             with self.lock:
                 task = self.tasks[task_id]
                 task["status"] = "error"
