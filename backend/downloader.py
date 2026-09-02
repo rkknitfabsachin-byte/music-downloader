@@ -166,7 +166,7 @@ class DownloadManager:
             return sorted(completed, key=lambda x: x.get("created_at", 0), reverse=True)
 
     def extract_info(self, url: str) -> Dict[str, Any]:
-        """Extract metadata from media URL with multi-strategy fallback."""
+        """Extract metadata from media URL. POT plugin handles YouTube bot bypass automatically."""
         clean_url = url.strip()
 
         # Check Cache
@@ -179,59 +179,28 @@ class DownloadManager:
 
         cookie_path = get_cookie_file()
 
-        # Multiple fallback strategies to guarantee extraction on datacenter IPs
-        strategies: List[Dict[str, Any]] = [
-            # Strategy 1: Standard with Node.js and cookies if available
-            {
-                "js_runtimes": {"node": {}},
-                **({"cookiefile": cookie_path} if cookie_path else {})
-            },
-            # Strategy 2: Mobile client emulation (Android & iOS)
-            {
-                "js_runtimes": {"node": {}},
-                "extractor_args": {"youtube": {"player_client": ["android", "ios"]}},
-            },
-            # Strategy 3: Web creator / mweb fallback
-            {
-                "js_runtimes": {"node": {}},
-                "extractor_args": {"youtube": {"player_client": ["web_creator", "mweb"]}},
-            },
-            # Strategy 4: TV client fallback
-            {
-                "js_runtimes": {"node": {}},
-                "extractor_args": {"youtube": {"player_client": ["tvhtml5", "tv"]}},
-            }
-        ]
+        ydl_opts = {
+            "quiet": True,
+            "no_warnings": True,
+            "extract_flat": False,
+            "skip_download": True,
+            "socket_timeout": 20,
+            "retries": 3,
+            "http_headers": DEFAULT_HTTP_HEADERS,
+            "js_runtimes": {"node": {}},
+        }
 
-        last_error = None
-        info = None
+        if cookie_path:
+            ydl_opts["cookiefile"] = cookie_path
 
-        for strategy in strategies:
-            ydl_opts = {
-                "quiet": True,
-                "no_warnings": True,
-                "extract_flat": False,
-                "skip_download": True,
-                "socket_timeout": 15,
-                "retries": 3,
-                "http_headers": DEFAULT_HTTP_HEADERS,
-                **strategy
-            }
-
-            try:
-                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                    info = ydl.extract_info(clean_url, download=False)
-                    if info:
-                        break
-            except Exception as e:
-                last_error = e
-                logger.warning(f"Extraction strategy failed ({strategy}): {e}. Retrying with next fallback...")
-
-        if not info:
-            logger.error(f"All extraction strategies failed for {clean_url}: {last_error}")
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(clean_url, download=False)
+        except Exception as e:
+            logger.error(f"Extraction failed for {clean_url}: {e}")
             return {
                 "success": False,
-                "error": str(last_error),
+                "error": str(e),
                 "url": clean_url,
                 "platform": detect_platform(clean_url)
             }
@@ -486,54 +455,42 @@ class DownloadManager:
                 }
             ]
 
-        # Download strategies
-        strategies = [
-            {"js_runtimes": {"node": {}}, **({"cookiefile": cookie_path} if cookie_path else {})},
-            {"js_runtimes": {"node": {}}, "extractor_args": {"youtube": {"player_client": ["android", "ios"]}}},
-            {"js_runtimes": {"node": {}}, "extractor_args": {"youtube": {"player_client": ["web_creator", "mweb"]}}},
-        ]
+        # Single yt-dlp call - POT plugin handles YouTube bot bypass automatically
+        ydl_opts: Dict[str, Any] = {
+            "outtmpl": outtmpl,
+            "quiet": True,
+            "no_warnings": True,
+            "progress_hooks": [lambda d: self._progress_hook(task_id, d)],
+            "noplaylist": True,
+            "windowsfilenames": True,
+            "restrictfilenames": False,
+            "http_headers": DEFAULT_HTTP_HEADERS,
+            "js_runtimes": {"node": {}},
+            "format": format_spec,
+            "writethumbnail": media_type == "audio" and format_ext in ["mp3", "m4a"],
+            "merge_output_format": "mp4" if media_type == "video" else None,
+            "postprocessors": postprocessors,
+            "postprocessor_args": postprocessor_args,
+            "concurrent_fragment_downloads": 8,
+            "buffersize": 1048576,
+            "http_chunk_size": 10485760,
+            "socket_timeout": 20,
+            "retries": 5,
+            "fragment_retries": 10,
+        }
 
-        last_error = None
-        info = None
+        if cookie_path:
+            ydl_opts["cookiefile"] = cookie_path
 
-        for strategy in strategies:
-            ydl_opts: Dict[str, Any] = {
-                "outtmpl": outtmpl,
-                "quiet": True,
-                "no_warnings": True,
-                "progress_hooks": [lambda d: self._progress_hook(task_id, d)],
-                "noplaylist": True,
-                "windowsfilenames": True,
-                "restrictfilenames": False,
-                "http_headers": DEFAULT_HTTP_HEADERS,
-                "format": format_spec,
-                "writethumbnail": media_type == "audio" and format_ext in ["mp3", "m4a"],
-                "merge_output_format": "mp4" if media_type == "video" else None,
-                "postprocessors": postprocessors,
-                "postprocessor_args": postprocessor_args,
-                "concurrent_fragment_downloads": 8,
-                "buffersize": 1048576,
-                "http_chunk_size": 10485760,
-                "socket_timeout": 15,
-                "retries": 5,
-                "fragment_retries": 10,
-                **strategy
-            }
-
-            try:
-                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                    info = ydl.extract_info(url, download=True)
-                    if info:
-                        break
-            except Exception as e:
-                last_error = e
-                logger.warning(f"Download strategy failed ({strategy}): {e}")
-
-        if not info:
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=True)
+        except Exception as e:
+            logger.error(f"Download failed for task {task_id}: {e}")
             with self.lock:
                 task = self.tasks[task_id]
                 task["status"] = "error"
-                task["error"] = str(last_error)
+                task["error"] = str(e)
                 task["speed"] = "Failed"
                 task["eta"] = "--"
             return

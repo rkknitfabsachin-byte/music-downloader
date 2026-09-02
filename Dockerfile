@@ -6,7 +6,7 @@ ENV PYTHONUNBUFFERED=1 \
     DEBIAN_FRONTEND=noninteractive \
     PORT=8000
 
-# Install FFmpeg, Node.js (for YouTube JS challenge signature solver), aria2, and curl
+# Install FFmpeg, Node.js (for JS challenge solver), aria2
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     nodejs \
@@ -17,7 +17,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-# Copy requirements and install dependencies
+# Copy requirements and install dependencies (including POT token plugins)
 COPY backend/requirements.txt ./backend/
 RUN pip install --no-cache-dir -r backend/requirements.txt
 
@@ -25,6 +25,7 @@ RUN pip install --no-cache-dir -r backend/requirements.txt
 COPY backend/ ./backend/
 COPY frontend/ ./frontend/
 COPY start.py ./
+COPY cookies.txt* ./
 
 # Create downloads directory
 RUN mkdir -p downloads && chmod 777 downloads
