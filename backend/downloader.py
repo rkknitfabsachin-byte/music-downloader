@@ -26,19 +26,12 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DOWNLOADS_DIR = os.path.join(BASE_DIR, "downloads")
 os.makedirs(DOWNLOADS_DIR, exist_ok=True)
 
-# Datacenter & Bot Bypass Configuration
+# Datacenter & Browser Headers
 DEFAULT_HTTP_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
     "Accept-Language": "en-US,en;q=0.9",
     "Sec-Fetch-Mode": "navigate",
-}
-
-DEFAULT_EXTRACTOR_ARGS = {
-    "youtube": {
-        "player_client": ["web_creator", "android", "ios", "mweb"],
-        "player_skip": ["configs"],
-    }
 }
 
 
@@ -155,7 +148,7 @@ class DownloadManager:
             return sorted(completed, key=lambda x: x.get("created_at", 0), reverse=True)
 
     def extract_info(self, url: str) -> Dict[str, Any]:
-        """Extract metadata from media URL with bot-bypass and caching."""
+        """Extract metadata from media URL with JavaScript challenge solver support."""
         clean_url = url.strip()
 
         # Check Cache
@@ -174,7 +167,7 @@ class DownloadManager:
             "socket_timeout": 15,
             "retries": 3,
             "http_headers": DEFAULT_HTTP_HEADERS,
-            "extractor_args": DEFAULT_EXTRACTOR_ARGS,
+            "js_runtimes": {"node": {}},
         }
 
         try:
@@ -381,7 +374,6 @@ class DownloadManager:
 
         outtmpl = os.path.join(task_dir, "%(title).100s [%(id)s].%(ext)s")
 
-        # High-Speed Optimized & Anti-Bot yt-dlp configuration
         ydl_opts: Dict[str, Any] = {
             "outtmpl": outtmpl,
             "quiet": True,
@@ -391,7 +383,7 @@ class DownloadManager:
             "windowsfilenames": True,
             "restrictfilenames": False,
             "http_headers": DEFAULT_HTTP_HEADERS,
-            "extractor_args": DEFAULT_EXTRACTOR_ARGS,
+            "js_runtimes": {"node": {}},
             # SPEED OPTIMIZATIONS
             "concurrent_fragment_downloads": 8,
             "buffersize": 1048576,
@@ -401,7 +393,6 @@ class DownloadManager:
             "fragment_retries": 10,
         }
 
-        # Check for cookies file if present
         cookies_file = os.path.join(BASE_DIR, "cookies.txt")
         if os.path.exists(cookies_file):
             ydl_opts["cookiefile"] = cookies_file
@@ -431,7 +422,6 @@ class DownloadManager:
                 }
             ]
 
-            # Embed thumbnail for MP3 & M4A
             if audio_codec in ["mp3", "m4a"]:
                 ydl_opts["writethumbnail"] = True
                 postprocessors.append({"key": "EmbedThumbnail"})
@@ -476,7 +466,6 @@ class DownloadManager:
                 real_title = info.get("title") or initial_title or "media"
                 thumbnail = info.get("thumbnail")
 
-            # Locate final output file
             downloaded_files = [
                 os.path.join(task_dir, f)
                 for f in os.listdir(task_dir)

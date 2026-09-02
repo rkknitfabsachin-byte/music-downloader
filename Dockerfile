@@ -6,9 +6,10 @@ ENV PYTHONUNBUFFERED=1 \
     DEBIAN_FRONTEND=noninteractive \
     PORT=8000
 
-# Install FFmpeg, aria2, and curl
+# Install FFmpeg, Node.js (for YouTube JS challenge signature solver), aria2, and curl
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
+    nodejs \
     aria2 \
     curl \
     ca-certificates \
